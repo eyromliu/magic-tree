@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Magical Gesture Tree 2025</title>
+    <style>
+        body { margin: 0; overflow: hidden; background: #010501; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
+        #container { width: 100vw; height: 100vh; }
+        
+        /* 预览窗口优化：确保能看到摄像头内容 */
+        #video-container { 
+            position: absolute; bottom: 20px; right: 20px; 
+            width: 240px; height: 180px; 
+            border: 2px solid #d4af37; border-radius: 12px; 
+            overflow: hidden; transform: scaleX(-1);
+            background: #000; z-index: 100;
+            box-shadow: 0 0 20px rgba(212, 175, 55, 0.3);
+        }
+        #input-video { width: 100%; height: 100%; object-fit: cover; }
+
+        #loading { 
+            position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); 
+            color: #d4af37; text-align: center; z-index: 1000;
+        }
+        .instructions { 
+            position: absolute; top: 30px; left: 30px; color: #d4af37; 
+            background: rgba(0,0,0,0.5); padding: 15px; border-radius: 8px;
+            border-left: 4px solid #990000; pointer-events: none;
+        }
+    </style>
+</head>
+<body>
+
+<div id="loading">✨ 魔法正在加载，请确保摄像头已开启...</div>
+<div class="instructions">
+    <strong style="color: #fff;">🎄 圣诞树控制手册</strong><br>
+    ✊ 握拳：聚拢树体 | 🖐 张开：绽放<br>
+    🤏 捏合/抓取：照片放大 | 🔄 移动手部：旋转
+</div>
+
+<div id="video-container">
+    <video id="input-video" playsinline></video>
+</div>
+<div id="container"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/three@0.158.0/build/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1646424915/hands.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tweenjs/tween.js@20.0.0/dist/tween.umd.js"></script>
+
+<script>
+/** * 创意前端专家配置
+ */
+const CONFIG = {
+    treeColor: 0x1a3310,  // 哑光深绿
+    goldColor: 0xffd700,  // 金属金
+    redColor: 0xb22222,   // 圣诞红
+    states: { CLOSED: 0, OPEN: 1, ZOOM: 2 }
+};
+
+let scene, camera, renderer, particles, photos = [], handsInstance;
+let currentState = CONFIG.states.OPEN;
+
+// --- 1. Three.js 场景构建 ---
+function initThree() {
+    scene = new THREE.Scene();
+    scene.fog = new THREE.FogExp2(0x010501, 0.015);
+
+    camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
+    camera.position.set(0, 5, 50);
+
+    renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.outputColorSpace = THREE.SRGBColorSpace;
+    document.getElementById('container').appendChild(renderer.domElement);
+
+    const light1 = new THREE.PointLight(CONFIG.goldColor, 100);
+    light1.position.set(20, 20, 20);
+    scene.add(light1);
+    scene.add(new THREE.AmbientLight(0xffffff, 0.3));
+
+    createTree();
+}
+
+function createTree() {
+    // 树体粒子
+    const pointsGeo = new THREE.BufferGeometry();
+    const count = 3000;
+    const positions = new Float32Array(count * 3);
+    const colors = new Float32Array(count * 3);
+
+    for (let i = 0; i < count; i++) {
+        const h = Math.random() * 40;
+        const r = (40 - h) * 0.35 * Math.random();
+        const a = Math.random() * Math.PI * 2;
+        
+        positions[i*3] = Math.cos(a) * r;
+        positions[i*3+1] = h - 15;
+        positions[i*3+2] = Math.sin(a) * r;
+
+        const c = new THREE.Color(Math.random() > 0.15 ? CONFIG.treeColor : CONFIG.goldColor);
+        colors[i*3] = c.r; colors[i*3+1] = c.g; colors[i*3+2] = c.b;
+    }
+    pointsGeo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    pointsGeo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+
+    const pointsMat = new THREE.PointsMaterial({
+        size: 0.12, vertexColors: true, transparent: true, opacity: 0.8, blending: THREE.AdditiveBlending
+    });
+    particles = new THREE.Points(pointsGeo, pointsMat);
+    scene.add(particles);
+
+    // 照片云 (红色金属感方块)
+    const boxGeo = new THREE.BoxGeometry(2, 2.8, 0.1);
+    for(let i=0; i<15; i++) {
+        const mat = new THREE.MeshPhongMaterial({ color: CONFIG.redColor, shininess: 80 });
+        const mesh = new THREE.Mesh(boxGeo, mat);
+        mesh.userData.origin = new THREE.Vector3((Math.random()-0.5)*40, (Math.random()-0.5)*30, (Math.random()-0.5)*20);
+        mesh.position.copy(mesh.userData.origin);
+        photos.push(mesh);
+        scene.add(mesh);
+    }
+}
+
+// --- 2. MediaPipe 核心逻辑 ---
+async function initMediaPipe() {
+    const videoElement = document.getElementById('input-video');
+
+    handsInstance = new Hands({
+        locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1646424915/${file}`
+    });
+
+    handsInstance.setOptions({
+        maxNumHands: 1,
+        modelComplexity: 1,
+        minDetectionConfidence: 0.5,
+        minTrackingConfidence: 0.5
+    });
+
+    handsInstance.onResults(onResults);
+
+    const cameraProvider = new Camera(videoElement, {
+        onFrame: async () => {
+            await handsInstance.send({ image: videoElement });
+        },
+        width: 640,
+        height: 480
+    });
+
+    try {
+        await cameraProvider.start();
+        document.getElementById('loading').style.display = 'none';
+    } catch (e) {
+        document.getElementById('loading').innerText = "❌ 无法访问摄像头";
+    }
+}
+
+function onResults(results) {
+    if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+        const lm = results.multiHandLandmarks[0];
+        
+        // 逻辑判断：握拳
+        const isFist = lm[8].y > lm[6].y && lm[12].y > lm[10].y && lm[16].y > lm[14].y;
+        // 逻辑判断：捏合 (拇指4 食指8)
+        const dist = Math.sqrt(Math.pow(lm[4].x-lm[8].x,2) + Math.pow(lm[4].y-lm[8].y,2));
+        const isPinch = dist < 0.04;
+
+        // 视图控制：根据手掌中心(9号点)旋转
+        particles.rotation.y = (lm[9].x - 0.5) * 4;
+        particles.rotation.z = (lm[9].y - 0.5) * 1;
+
+        if (isPinch) updateAppState(CONFIG.states.ZOOM);
+        else if (isFist) updateAppState(CONFIG.states.CLOSED);
+        else updateAppState(CONFIG.states.OPEN);
+    }
+}
+
+function updateAppState(nextState) {
+    if (currentState === nextState) return;
+    currentState = nextState;
+
+    // 树体变换
+    const targetScale = nextState === CONFIG.states.CLOSED ? 0.15 : 1.0;
+    new TWEEN.Tween(particles.scale).to({ x: targetScale, z: targetScale }, 600)
+        .easing(TWEEN.Easing.Back.Out).start();
+
+    // 照片变换
+    photos.forEach((p, i) => {
+        let dest = new THREE.Vector3().copy(p.userData.origin);
+        if (nextState === CONFIG.states.ZOOM) {
+            dest.set((i%5 - 2)*8, 0, 30);
+        } else if (nextState === CONFIG.states.CLOSED) {
+            dest.set(0, p.userData.origin.y, 0);
+        }
+        new TWEEN.Tween(p.position).to({ x: dest.x, y: dest.y, z: dest.z }, 800)
+            .easing(TWEEN.Easing.Cubic.Out).start();
+    });
+}
+
+function animate(time) {
+    requestAnimationFrame(animate);
+    TWEEN.update(time);
+    
+    // 微小动效
+    if(particles) particles.rotation.y += 0.002;
+    photos.forEach((p, i) => {
+        p.rotation.y += 0.01;
+        p.position.y += Math.sin(time/500 + i) * 0.02;
+    });
+
+    renderer.render(scene, camera);
+}
+
+// 启动序列
+window.addEventListener('DOMContentLoaded', () => {
+    initThree();
+    initMediaPipe();
+    animate();
+    
+    window.addEventListener('resize', () => {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+    });
+});
+</script>
+</body>
+</html>
